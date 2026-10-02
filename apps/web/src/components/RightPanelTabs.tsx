@@ -122,6 +122,7 @@ interface RightPanelTabsProps {
   onAddPullRequest: () => void;
   onAddPullRequests: () => void;
   onAddAgents: () => void;
+  onAddBackgroundTasks?: (() => void) | undefined;
   onAddDevice: () => void;
   browserAvailable: boolean;
   terminalAvailable: boolean;
@@ -325,6 +326,7 @@ function RightPanelEmptyState(props: {
   onAddPullRequest: () => void;
   onAddPullRequests: () => void;
   onAddAgents: () => void;
+  onAddBackgroundTasks?: (() => void) | undefined;
   onAddDevice: () => void;
   browserAvailable: boolean;
   terminalAvailable: boolean;
@@ -402,6 +404,15 @@ function RightPanelEmptyState(props: {
       disabledReason: SURFACE_UNAVAILABLE_HINTS.agents,
       onClick: props.onAddAgents,
       badgeCount: props.liveAgentCount,
+    },
+    {
+      label: "Background Tasks",
+      icon: TerminalSquare,
+      shortcut: "K",
+      available: props.agentsAvailable && props.onAddBackgroundTasks !== undefined,
+      disabledReason: SURFACE_UNAVAILABLE_HINTS.agents,
+      onClick: props.onAddBackgroundTasks ?? (() => undefined),
+      badgeCount: 0,
     },
     {
       label: "Device",
@@ -630,6 +641,8 @@ function surfaceTitle(
       return "Pull requests";
     case "agents":
       return "Agents";
+    case "background-tasks":
+      return "Background Tasks";
     case "device":
       return surface.title ?? surface.target?.name ?? "Device";
     case "preview": {
@@ -715,6 +728,8 @@ function SurfaceIcon({
       return <PullRequestGlyph.link className="size-3 shrink-0" />;
     case "agents":
       return <Bot className="size-3 shrink-0" />;
+    case "background-tasks":
+      return <TerminalSquare className="size-3 shrink-0" />;
     case "device":
       return surface.target?.platform === "ios" ? (
         <AppleIcon className="size-3 shrink-0" />
@@ -924,6 +939,15 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
       available: props.agentsAvailable,
       disabledReason: SURFACE_DISABLED_REASONS.agents,
       onClick: props.onAddAgents,
+    },
+    {
+      label: "Background Tasks",
+      icon: TerminalSquare,
+      shortcut: "K",
+      available: props.agentsAvailable && props.onAddBackgroundTasks !== undefined,
+      disabledReason: SURFACE_UNAVAILABLE_HINTS.agents,
+      onClick: props.onAddBackgroundTasks ?? (() => undefined),
+      badgeCount: 0,
     },
     {
       label: "Device",
@@ -1415,6 +1439,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
             onAddPullRequest={props.onAddPullRequest}
             onAddPullRequests={props.onAddPullRequests}
             onAddAgents={props.onAddAgents}
+            onAddBackgroundTasks={props.onAddBackgroundTasks}
             onAddDevice={props.onAddDevice}
             browserAvailable={props.browserAvailable}
             terminalAvailable={props.terminalAvailable}

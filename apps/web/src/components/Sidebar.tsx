@@ -1,3 +1,7 @@
+import {
+  backgroundTaskIndicatorVisible,
+  backgroundTaskIndicatorDelay,
+} from "@t3tools/client-runtime/state/backgroundTasks";
 import { requestCustomSnooze } from "./CustomSnoozeDialog";
 import { useSupportsMultiplePullRequests } from "~/hooks/useSupportsMultiplePullRequests";
 import { resolveThreadCurrentPullRequestLink } from "@t3tools/shared/threadPullRequests";
@@ -1108,6 +1112,28 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   });
   const terminalStatus = terminalStatusFromRunningIds(runningTerminalIds);
   const terminalProcessCount = runningTerminalIds.length;
+  const [backgroundIndicatorNow, refreshBackgroundIndicator] = useState(() => Date.now());
+  const backgroundSummary = thread.backgroundTaskSummary;
+  const backgroundTaskCount = backgroundSummary?.count ?? 0;
+  const backgroundTaskStartedAt = backgroundSummary?.oldestStartedAt ?? null;
+  const foregroundRunning =
+    thread.session?.activeTurnId != null || thread.session?.status === "starting";
+  const backgroundIndicatorVisible = backgroundTaskIndicatorVisible(
+    backgroundSummary,
+    foregroundRunning,
+    backgroundIndicatorNow,
+  );
+  useEffect(() => {
+    const delay = backgroundTaskIndicatorDelay(
+      { count: backgroundTaskCount, oldestStartedAt: backgroundTaskStartedAt },
+      foregroundRunning,
+      Date.now(),
+    );
+    if (delay === null) return;
+    const timer = setTimeout(() => refreshBackgroundIndicator(Date.now()), delay);
+    return () => clearTimeout(timer);
+  }, [backgroundTaskCount, backgroundTaskStartedAt, foregroundRunning]);
+
   // Unsent composer text on this thread. The open thread shows its own
   // composer, so the marker only decorates rows you have navigated away from.
   const hasUnsentDraft = useThreadHasUnsentDraft(threadRef) && !props.isActive;
@@ -1590,6 +1616,19 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
       />
     </span>
   ) : null;
+  const backgroundTaskStatusIcon = backgroundIndicatorVisible ? (
+    <InlineButton
+      aria-label={`View ${backgroundSummary?.count ?? 0} background tasks`}
+      onClick={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        onThreadActivate(threadRef);
+        useRightPanelStore.getState().open(threadRef, "background-tasks");
+      }}
+    >
+      <TerminalIcon className="size-3.5" />
+    </InlineButton>
+  ) : null;
   // Same pen the new-thread draft rows lead with, so both kinds of unsent
   // work read the same way in the list.
   const draftIndicator = hasUnsentDraft ? (
@@ -1684,6 +1723,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
             {title}
             {pinIndicator}
             {terminalStatusIcon}
+            {backgroundTaskStatusIcon}
             {isRegeneratingTitle ? (
               <span role="status" className="sr-only">
                 Regenerating title
@@ -2003,6 +2043,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                 <span className="flex-1" />
               )}
               {terminalStatusIcon}
+              {backgroundTaskStatusIcon}
               {prBadge}
               {diff ? (
                 <span className="shrink-0 font-mono">

@@ -1,3 +1,4 @@
+import BackgroundTasksPanel from "./BackgroundTasksPanel";
 import { isChatGptUsageLimitError } from "@t3tools/shared/usageLimits";
 import { useLoadBalancedEnvironment } from "../hooks/useLoadBalancedEnvironment";
 import { visibleThreadPullRequests } from "@t3tools/shared/threadPullRequests";
@@ -4562,6 +4563,10 @@ export default function ChatView(props: ChatViewProps) {
     if (!activeThreadRef || !activeProject) return;
     useRightPanelStore.getState().open(activeThreadRef, "files");
   }, [activeProject, activeThreadRef]);
+  const addBackgroundTasksSurface = useCallback(() => {
+    if (!activeThreadRef) return;
+    useRightPanelStore.getState().open(activeThreadRef, "background-tasks");
+  }, [activeThreadRef]);
   const addAgentsSurface = useCallback(() => {
     if (!activeThreadRef) return;
     useRightPanelStore.getState().open(activeThreadRef, "agents");
@@ -6301,6 +6306,16 @@ export default function ChatView(props: ChatViewProps) {
         : "Monitoring",
       actions: (
         <>
+          {!working && !(rightPanelOpen && activeRightPanelSurface?.kind === "background-tasks") ? (
+            <Button
+              size="xs"
+              variant="ghost"
+              aria-label="View background tasks"
+              onClick={addBackgroundTasksSurface}
+            >
+              View
+            </Button>
+          ) : null}
           {showViewAgents ? (
             <Button size="xs" variant="ghost" aria-label="View agents" onClick={addAgentsSurface}>
               View
@@ -6322,6 +6337,7 @@ export default function ChatView(props: ChatViewProps) {
     activeRightPanelSurface?.kind,
     activeThread,
     addAgentsSurface,
+    addBackgroundTasksSurface,
     agentPanelModel.liveCount,
     handleStopBackgroundWork,
     isStoppingBackgroundWork,
@@ -9630,6 +9646,11 @@ export default function ChatView(props: ChatViewProps) {
       />
     ) : renderedRightPanelSurface?.kind === "pull-requests" && activeThreadRef ? (
       <ThreadPullRequestsPanel threadRef={activeThreadRef} />
+    ) : renderedRightPanelSurface?.kind === "background-tasks" && activeThreadRef ? (
+      <BackgroundTasksPanel
+        key={`${activeThreadRef.environmentId}:${activeThreadRef.threadId}`}
+        threadRef={activeThreadRef}
+      />
     ) : renderedRightPanelSurface?.kind === "agents" ? (
       <AgentsPanel
         model={agentPanelModel}
@@ -10292,6 +10313,7 @@ export default function ChatView(props: ChatViewProps) {
           onAddPullRequest={addPullRequestSurface}
           onAddPullRequests={addPullRequestsSurface}
           onAddAgents={addAgentsSurface}
+          onAddBackgroundTasks={addBackgroundTasksSurface}
           onAddDevice={addDeviceSurface}
           browserAvailable={isPreviewSupportedInRuntime()}
           terminalAvailable={activeProject !== null}
@@ -10349,6 +10371,7 @@ export default function ChatView(props: ChatViewProps) {
             onAddPullRequest={addPullRequestSurface}
             onAddPullRequests={addPullRequestsSurface}
             onAddAgents={addAgentsSurface}
+            onAddBackgroundTasks={addBackgroundTasksSurface}
             onAddDevice={addDeviceSurface}
             browserAvailable={isPreviewSupportedInRuntime()}
             terminalAvailable={activeProject !== null}

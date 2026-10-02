@@ -110,11 +110,24 @@ answer. Pinned threads stay in the pinned section.
 While this is on, the active list is ordered by when each thread last came back to you, so you
 cannot drag to reorder it. Your saved order returns when you turn it off.
 
+## Inspect background work
+
+Open **Background Tasks** beside **Agents** to see native commands and monitors that Codex or
+Claude leaves running. The **Monitoring** banner also opens this list. A thread indicator appears
+after a task has run for one minute, or when the foreground turn ends while work remains active.
+
+Select a task to inspect its command and available output. **Refresh** reads the latest output tail;
+providers may not expose output for every task. **Stop task** stops that task when the provider
+supports individual controls. Stopping a monitor ends its watcher; it does not stop the external
+service being watched. Other providers may not report background tasks.
+
 ## Settle finished work
 
 Choose **Settle thread** from its menu to move finished work out of the active list
 without deleting the conversation. **Un-settle thread** restores it to active work
 and prevents automatic settlement until new activity resumes the usual rules.
+Settling stops the thread's native provider-owned background tasks. Detached services outside the
+provider's ownership may continue running. Un-settling does not restart stopped tasks.
 Manually settling an idle thread dismisses unanswered async questions without
 sending an answer or restarting the agent. Settling also closes the thread's
 terminals that wait at an idle prompt, and keeps their output. A terminal that

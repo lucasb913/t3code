@@ -2290,6 +2290,18 @@ function OpenCommandPaletteDialog(props: {
     });
   }
 
+  if (activeThread)
+    actionItems.push({
+      kind: "action",
+      value: "action:background-tasks",
+      title: "Open background tasks",
+      searchTerms: ["background", "tasks", "monitoring", "service", "running"],
+      icon: <MonitorIcon className={ITEM_ICON_CLASS} />,
+      run: async () =>
+        useRightPanelStore
+          .getState()
+          .open(scopeThreadRef(activeThread.environmentId, activeThread.id), "background-tasks"),
+    });
   const rootGroups = buildRootGroups({ actionItems, recentThreadItems });
   const settingsSearchItems: CommandPaletteActionItem[] = searchSettings(
     deferredQuery,
