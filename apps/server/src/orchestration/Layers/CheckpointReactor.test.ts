@@ -117,6 +117,10 @@ function createProviderServiceHarness(
         ] satisfies ReadonlyArray<ProviderSession>)
       : Effect.succeed([] as ReadonlyArray<ProviderSession>);
   const service: ProviderServiceShape = {
+    listBackgroundTasks: () => Effect.succeed({ supported: false, tasks: [] }),
+    subscribeBackgroundTasks: () => Stream.empty,
+    stopBackgroundTask: () => Effect.die("Background task stop not stubbed"),
+    readBackgroundTaskOutput: () => Effect.die("Background task output not stubbed"),
     startSession: () => unsupported(),
     sendTurn: () => unsupported(),
     compactThread: () => unsupported(),

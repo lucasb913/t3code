@@ -1,3 +1,4 @@
+import * as Option from "effect/Option";
 import {
   ApprovalRequestId,
   DEFAULT_MODEL,
@@ -211,7 +212,28 @@ export interface CodexThreadSnapshot {
   readonly turns: ReadonlyArray<CodexThreadTurnSnapshot>;
 }
 
+const BackgroundTerminalPage = Schema.Struct({
+  data: Schema.Array(
+    Schema.Struct({
+      processId: Schema.String,
+      itemId: Schema.optional(Schema.String),
+      command: Schema.optional(Schema.String),
+    }),
+  ),
+  nextCursor: Schema.optional(Schema.NullOr(Schema.String)),
+});
+const BackgroundTerminalStopped = Schema.Struct({ terminated: Schema.Boolean });
+const decodeBackgroundTerminalPage = Schema.decodeUnknownEffect(BackgroundTerminalPage);
+const decodeBackgroundTerminalStopped = Schema.decodeUnknownEffect(BackgroundTerminalStopped);
+
 export interface CodexSessionRuntimeShape {
+  readonly backgroundTerminals?: {
+    readonly list: Effect.Effect<
+      ReadonlyArray<(typeof BackgroundTerminalPage.Type.data)[number]>,
+      CodexSessionRuntimeError
+    >;
+    readonly stop: (processId: string) => Effect.Effect<boolean, CodexSessionRuntimeError>;
+  };
   readonly start: () => Effect.Effect<ProviderSession, CodexSessionRuntimeError>;
   readonly getSession: Effect.Effect<ProviderSession>;
   readonly sendTurn: (
@@ -1223,6 +1245,41 @@ type CodexHistoryClient = {
   readonly raw: Pick<CodexClient.CodexAppServerClient["Service"]["raw"], "request">;
   readonly request: CodexClient.CodexAppServerClient["Service"]["request"];
 };
+
+export const listCodexBackgroundTerminals = Effect.fn("listCodexBackgroundTerminals")(function* (
+  client: Pick<CodexHistoryClient, "raw">,
+  threadId: string,
+) {
+  const terminals: Array<(typeof BackgroundTerminalPage.Type.data)[number]> = [];
+  let cursor: string | null = null;
+  const seen = new Set<string>();
+  do {
+    const raw: unknown = yield* client.raw.request("thread/backgroundTerminals/list", {
+      threadId,
+      cursor,
+      limit: 100,
+    });
+    const page = yield* decodeBackgroundTerminalPage(raw).pipe(
+      Effect.mapError(
+        (cause) =>
+          new CodexErrors.CodexAppServerRequestError({
+            code: -32603,
+            errorMessage: "Invalid background terminal roster.",
+            cause,
+          }),
+      ),
+    );
+    terminals.push(...page.data);
+    cursor = page.nextCursor ?? null;
+    if (cursor && seen.has(cursor))
+      return yield* new CodexErrors.CodexAppServerRequestError({
+        code: -32603,
+        errorMessage: "Repeated background terminal cursor.",
+      });
+    if (cursor) seen.add(cursor);
+  } while (cursor);
+  return terminals;
+});
 
 const readCodexHistoryMode = Effect.fn("readCodexHistoryMode")(function* (
   client: CodexHistoryClient,
@@ -2535,12 +2592,42 @@ export const makeCodexSessionRuntime = (
           Effect.logError("Failed to emit Codex session closed event.", { cause }),
         ),
       );
+      // Explicit session shutdown owns these terminals even after the turn ended.
+      const nativeThreadId = yield* readProviderThreadId.pipe(Effect.option);
+      if (Option.isSome(nativeThreadId))
+        yield* client.raw
+          .request("thread/backgroundTerminals/clean", { threadId: nativeThreadId.value })
+          .pipe(Effect.timeoutOption("3 seconds"), Effect.ignore);
       yield* Scope.close(runtimeScope, Exit.void);
       yield* Queue.shutdown(serverNotifications);
       yield* Queue.shutdown(events);
     });
 
     return {
+      backgroundTerminals: {
+        list: readProviderThreadId.pipe(
+          Effect.flatMap((threadId) => listCodexBackgroundTerminals(client, threadId)),
+        ),
+        stop: (processId) =>
+          Effect.gen(function* () {
+            const threadId = yield* readProviderThreadId;
+            const raw = yield* client.raw.request("thread/backgroundTerminals/terminate", {
+              threadId,
+              processId,
+            });
+            const result = yield* decodeBackgroundTerminalStopped(raw).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new CodexErrors.CodexAppServerRequestError({
+                    code: -32603,
+                    errorMessage: "Invalid background terminal stop response.",
+                    cause,
+                  }),
+              ),
+            );
+            return result.terminated;
+          }),
+      },
       start,
       getSession: Ref.get(sessionRef),
       compactThread: Effect.gen(function* () {

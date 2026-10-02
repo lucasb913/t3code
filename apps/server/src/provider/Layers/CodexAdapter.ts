@@ -1,3 +1,5 @@
+import * as DateTime from "effect/DateTime";
+import * as Option from "effect/Option";
 /**
  * CodexAdapterLive - Scoped live implementation for the Codex provider adapter.
  *
@@ -109,7 +111,11 @@ export interface CodexAdapterLiveOptions {
   readonly nativeEventLogger?: EventNdjsonLogger;
 }
 
+import { makeNativeCommandIndex } from "../NativeBackgroundTasks.ts";
+
 interface CodexAdapterSessionContext {
+  readonly nativeTaskSessionKey: string;
+  readonly nativeCommands: ReturnType<typeof makeNativeCommandIndex>;
   readonly threadId: ThreadId;
   readonly scope: Scope.Closeable;
   readonly runtime: CodexSessionRuntimeShape;
@@ -2366,9 +2372,83 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         // this a child of `startSession`, and Effect interrupts a fiber's
         // children when it completes, so the consumer died on return and every
         // runtime event the session emitted afterwards was dropped.
+        const nativeTaskSessionKey = yield* crypto.randomUUIDv4.pipe(
+          Effect.mapError(
+            (cause) =>
+              new ProviderAdapterProcessError({
+                provider: PROVIDER,
+                threadId: input.threadId,
+                detail: cause.message,
+                cause,
+              }),
+          ),
+        );
+        const nativeCommands = makeNativeCommandIndex();
+        const nativeBackgroundIds = new Set<string>();
+        const reconcileBackgroundTerminals = Effect.gen(function* () {
+          if (!runtime.backgroundTerminals) return;
+          const result = yield* runtime.backgroundTerminals.list.pipe(Effect.option);
+          if (Option.isNone(result)) return;
+          const terminals = result.value;
+          const ids = new Set(terminals.map((terminal) => terminal.processId));
+          for (const terminal of terminals) {
+            if (nativeBackgroundIds.has(terminal.processId)) continue;
+            nativeBackgroundIds.add(terminal.processId);
+            yield* Queue.offer(runtimeEventQueue, {
+              eventId: EventId.make(
+                `background-start:${nativeTaskSessionKey}:${terminal.processId}`,
+              ),
+              provider: PROVIDER,
+              threadId: input.threadId,
+              createdAt: DateTime.formatIso(yield* DateTime.now),
+              type: "task.started",
+              payload: {
+                taskId: RuntimeTaskId.make(terminal.processId),
+                taskType: "shell",
+                description: terminal.command ?? "Background command",
+                ...(terminal.itemId ? { toolUseId: terminal.itemId } : {}),
+              },
+            });
+          }
+          for (const taskId of nativeBackgroundIds) {
+            if (ids.has(taskId)) continue;
+            nativeBackgroundIds.delete(taskId);
+            yield* Queue.offer(runtimeEventQueue, {
+              eventId: EventId.make(`background-end:${nativeTaskSessionKey}:${taskId}`),
+              provider: PROVIDER,
+              threadId: input.threadId,
+              createdAt: DateTime.formatIso(yield* DateTime.now),
+              type: "task.completed",
+              payload: {
+                taskId: RuntimeTaskId.make(taskId),
+                taskType: "shell",
+                status: "completed",
+              },
+            });
+          }
+        });
         const eventFiber = yield* Stream.runForEach(runtime.events, (event) =>
           Effect.gen(function* () {
             yield* writeNativeEvent(event);
+            if (event.method === "item/started" || event.method === "item/completed") {
+              const payload =
+                readPayload(EffectCodexSchema.V2ItemStartedNotification, event.payload) ??
+                readPayload(EffectCodexSchema.V2ItemCompletedNotification, event.payload);
+              if (payload?.item.type === "commandExecution") {
+                nativeCommands.start(payload.item.id, payload.item.command, event.createdAt);
+                if (
+                  event.method === "item/completed" &&
+                  typeof payload.item.aggregatedOutput === "string"
+                )
+                  nativeCommands.replace(payload.item.id, payload.item.aggregatedOutput);
+              }
+            } else if (event.method === "item/commandExecution/outputDelta") {
+              const payload = readPayload(
+                EffectCodexSchema.V2CommandExecutionOutputDeltaNotification,
+                event.payload,
+              );
+              if (payload) nativeCommands.append(payload.itemId, payload.delta);
+            }
             if (event.method === "turn/started" && event.turnId) {
               if (turnTokenUsage.activeTurnId !== event.turnId) {
                 turnTokenUsage.byTurnId.clear();
@@ -2515,6 +2595,17 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
               return;
             }
             yield* Queue.offerAll(runtimeEventQueue, runtimeEvents);
+            if (
+              event.method === "turn/completed" ||
+              (event.method === "item/completed" &&
+                runtimeEvents.some(
+                  (entry) =>
+                    entry.type === "item.completed" &&
+                    entry.payload.itemType === "command_execution",
+                ))
+            ) {
+              yield* reconcileBackgroundTerminals;
+            }
           }),
         ).pipe(Effect.forkIn(sessionScope));
 
@@ -2538,6 +2629,8 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         );
 
         sessions.set(input.threadId, {
+          nativeTaskSessionKey,
+          nativeCommands,
           threadId: input.threadId,
           scope: sessionScope,
           runtime,
@@ -2799,7 +2892,103 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     ),
   );
 
+  const listBackgroundTasks: NonNullable<CodexAdapterShape["backgroundTasks"]>["list"] = (
+    threadId,
+  ) =>
+    Effect.gen(function* () {
+      const context = yield* requireSession(threadId);
+      if (!context.runtime.backgroundTerminals) return [];
+      const terminals = yield* context.runtime.backgroundTerminals.list.pipe(
+        Effect.mapError(
+          (cause) =>
+            new ProviderAdapterRequestError({
+              provider: PROVIDER,
+              method: "thread/backgroundTerminals/list",
+              detail: cause.message,
+              cause,
+            }),
+        ),
+      );
+      return terminals.map((terminal) => {
+        const command = terminal.itemId ? context.nativeCommands.get(terminal.itemId) : undefined;
+        return {
+          taskId: terminal.processId,
+          sessionKey: context.nativeTaskSessionKey,
+          provider: PROVIDER,
+          kind: "command" as const,
+          description:
+            terminal.command ?? command?.command ?? `Background terminal ${terminal.processId}`,
+          ...(terminal.command ? { command: terminal.command } : {}),
+          ...(terminal.itemId ? { toolUseId: terminal.itemId } : {}),
+          ...(command ? { startedAt: command.startedAt } : {}),
+          canStop: true,
+        };
+      });
+    });
+  const currentBackgroundTask = Effect.fn("currentBackgroundTask")(function* (
+    input: import("@t3tools/contracts").BackgroundTaskInput,
+  ) {
+    const context = yield* requireSession(input.threadId);
+    if (context.nativeTaskSessionKey !== input.sessionKey)
+      return yield* new ProviderAdapterRequestError({
+        provider: PROVIDER,
+        method: "backgroundTasks",
+        detail: "The task belongs to an earlier provider session.",
+      });
+    const tasks = yield* listBackgroundTasks(input.threadId);
+    return { context, task: tasks.find((task) => task.taskId === input.taskId) };
+  });
+  const backgroundTasks: NonNullable<CodexAdapterShape["backgroundTasks"]> = {
+    list: listBackgroundTasks,
+    stop: (input) =>
+      Effect.gen(function* () {
+        const { context, task } = yield* currentBackgroundTask(input);
+        if (!task || !context.runtime.backgroundTerminals) return;
+        yield* context.runtime.backgroundTerminals.stop(task.taskId).pipe(
+          Effect.mapError(
+            (cause) =>
+              new ProviderAdapterRequestError({
+                provider: PROVIDER,
+                method: "thread/backgroundTerminals/terminate",
+                detail: cause.message,
+                cause,
+              }),
+          ),
+        );
+        const remaining = yield* listBackgroundTasks(input.threadId);
+        if (remaining.some((entry) => entry.taskId === task.taskId))
+          return yield* new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "thread/backgroundTerminals/terminate",
+            detail: "The provider still reports this terminal as running.",
+          });
+        const stamp = {
+          eventId: EventId.make(`background-stop:${input.sessionKey}:${task.taskId}`),
+          createdAt: DateTime.formatIso(yield* DateTime.now),
+        };
+        yield* Queue.offer(runtimeEventQueue, {
+          ...stamp,
+          provider: PROVIDER,
+          threadId: input.threadId,
+          type: "task.completed",
+          payload: {
+            taskId: RuntimeTaskId.make(task.taskId),
+            status: "stopped",
+            taskType: "shell",
+          },
+        });
+      }),
+    output: (input) =>
+      Effect.gen(function* () {
+        const { context, task } = yield* currentBackgroundTask(input);
+        return task?.toolUseId
+          ? context.nativeCommands.output(task.toolUseId)
+          : { available: false, text: "", truncated: false };
+      }),
+  };
+
   return {
+    backgroundTasks,
     provider: PROVIDER,
     capabilities: {
       sessionModelSwitch: "in-session",

@@ -407,7 +407,14 @@ function rememberPendingTaskEntry(
   }
 }
 
+import { claudeBackgroundOutputFile, readNativeOutputTail } from "../NativeBackgroundTasks.ts";
+import type { BackgroundTask } from "@t3tools/contracts";
+
 interface ClaudeSessionContext {
+  readonly nativeTaskSessionKey: string;
+  hasNativeBackgroundRoster: boolean;
+  readonly nativeBackgroundTasks: Map<string, BackgroundTask & { outputFile?: string }>;
+  readonly nativeTaskMetadata: Map<string, BackgroundTask & { outputFile?: string }>;
   session: ProviderSession;
   startInput: Parameters<ClaudeAdapterShape["startSession"]>[0];
   readonly turnStartMessageIds: Array<string | null>;
@@ -470,6 +477,7 @@ interface ClaudeSessionContext {
 interface ClaudeQueryRuntime extends AsyncIterable<SDKMessage> {
   /** SDK Query.interrupt — present on real queries; optional for test doubles. */
   readonly interrupt?: () => Promise<unknown>;
+  readonly stopTask?: (taskId: string) => Promise<void>;
   readonly setModel: (model?: string) => Promise<void>;
   readonly setPermissionMode: (mode: PermissionMode) => Promise<void>;
   readonly setMaxThinkingTokens: (maxThinkingTokens: number | null) => Promise<void>;
@@ -3198,6 +3206,15 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
   });
 
+  const rememberNativeTask = (
+    context: ClaudeSessionContext,
+    task: BackgroundTask & { outputFile?: string },
+  ) => {
+    context.nativeTaskMetadata.set(task.taskId, task);
+    if (context.nativeTaskMetadata.size > 256)
+      context.nativeTaskMetadata.delete(context.nativeTaskMetadata.keys().next().value!);
+  };
+
   const handleUserMessage = Effect.fn("handleUserMessage")(function* (
     context: ClaudeSessionContext,
     message: SDKMessage,
@@ -3217,6 +3234,40 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       const [index, tool] = toolEntry;
       const itemStatus = toolResult.isError ? "failed" : "completed";
       const toolUseResult = readClaudeToolUseResult(message);
+      if (toolUseResult && ["Bash", "Monitor"].includes(tool.toolName)) {
+        const taskId =
+          trimmedString(toolUseResult.backgroundTaskId) ?? trimmedString(toolUseResult.taskId);
+        if (taskId) {
+          const previous =
+            context.nativeTaskMetadata.get(taskId) ?? context.nativeBackgroundTasks.get(taskId);
+          const outputFile =
+            trimmedString(toolUseResult.outputFile) ??
+            trimmedString(toolUseResult.rawOutputPath) ??
+            (tool.toolName === "Bash"
+              ? claudeBackgroundOutputFile(toolResult.text, taskId)
+              : undefined);
+          const task = {
+            ...previous,
+            taskId,
+            sessionKey: context.nativeTaskSessionKey,
+            provider: PROVIDER,
+            description:
+              previous?.description ??
+              trimmedString(tool.input.description) ??
+              tool.detail ??
+              "Background task",
+            kind: tool.toolName === "Monitor" ? ("monitor" as const) : ("command" as const),
+            toolUseId: tool.itemId,
+            ...(typeof tool.input.command === "string" ? { command: tool.input.command } : {}),
+            ...(tool.agentId ? { agentId: tool.agentId } : {}),
+            ...(outputFile ? { outputFile } : {}),
+            canStop: context.query.stopTask !== undefined,
+          };
+          rememberNativeTask(context, task);
+          if (context.nativeBackgroundTasks.has(taskId))
+            context.nativeBackgroundTasks.set(taskId, task);
+        }
+      }
       const toolData = {
         toolName: tool.toolName,
         input: tool.input,
@@ -3833,6 +3884,36 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           effort,
         });
         context.liveTaskIds.add(message.task_id);
+        if (
+          message.task_type &&
+          ["local_bash", "shell", "monitor", "monitor_mcp", "mcp_task"].includes(message.task_type)
+        ) {
+          const previous = context.nativeTaskMetadata.get(message.task_id);
+          const task: BackgroundTask = {
+            ...previous,
+            taskId: message.task_id,
+            sessionKey: context.nativeTaskSessionKey,
+            provider: PROVIDER,
+            kind:
+              launchingTool?.toolName === "Monitor" || message.task_type.startsWith("monitor")
+                ? "monitor"
+                : message.task_type === "mcp_task"
+                  ? "unknown"
+                  : "command",
+            description: message.description,
+            startedAt: previous?.startedAt ?? base.createdAt,
+            ...(message.tool_use_id ? { toolUseId: message.tool_use_id } : {}),
+            ...(owningAgentId ? { agentId: owningAgentId } : {}),
+            ...(typeof launchInput?.command === "string" ? { command: launchInput.command } : {}),
+            canStop: context.query.stopTask !== undefined,
+          };
+          rememberNativeTask(context, task);
+          if (
+            (!context.hasNativeBackgroundRoster && message.is_backgrounded !== false) ||
+            context.nativeBackgroundTasks.has(message.task_id)
+          )
+            context.nativeBackgroundTasks.set(message.task_id, task);
+        }
         yield* offerRuntimeEvent({
           ...base,
           type: "task.started",
@@ -3891,6 +3972,21 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         // Status patch (killed/paused/backgrounded/end_time/error) — main
         // previously dropped this on the floor, losing all transitions.
         const patch = message.patch;
+        const nativeTask = context.nativeTaskMetadata.get(message.task_id);
+        if (nativeTask) {
+          const next = {
+            ...nativeTask,
+            ...(patch.description ? { description: patch.description } : {}),
+          };
+          rememberNativeTask(context, next);
+          if (patch.is_backgrounded === true || context.nativeBackgroundTasks.has(message.task_id))
+            context.nativeBackgroundTasks.set(message.task_id, next);
+          if (
+            patch.is_backgrounded === false ||
+            ["completed", "failed", "killed", "paused"].includes(patch.status ?? "")
+          )
+            context.nativeBackgroundTasks.delete(message.task_id);
+        }
         const status =
           patch.status !== undefined ? CLAUDE_TASK_PATCH_STATUS[patch.status] : undefined;
         if (status === "completed" || status === "failed" || status === "cancelled") {
@@ -3918,6 +4014,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         return;
       }
       case "task_notification": {
+        context.nativeBackgroundTasks.delete(message.task_id);
+        context.nativeTaskMetadata.delete(message.task_id);
         context.liveTaskIds.delete(message.task_id);
         yield* emitThreadTokenUsage(
           context,
@@ -4012,20 +4110,68 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         // by a different model.
         yield* emitRuntimeWarning(context, message.content, message);
         return;
-      // Inner protocol/UX details with no T3 surface today — consumed
-      // deliberately so they don't masquerade as unknown-subtype warnings.
-      // `background_tasks_changed` is a roster snapshot ({tasks: [...]}); the
-      // task_* lifecycle events carry the authoritative per-agent data and
-      // the typed background_tasks control request is the reconciliation
-      // source. `control_request_progress` is a liveness heartbeat for an
-      // in-flight control request. `worker_shutting_down` is a Remote
-      // Control worker notice; the session close path reports the outcome.
+      case "background_tasks_changed": {
+        context.hasNativeBackgroundRoster = true;
+        const previous = new Map(context.nativeBackgroundTasks);
+        context.nativeBackgroundTasks.clear();
+        for (const native of message.tasks) {
+          if (
+            ["local_agent", "remote_agent", "local_workflow", "plan", "dream"].includes(
+              native.task_type,
+            )
+          )
+            continue;
+          const metadata =
+            context.nativeTaskMetadata.get(native.task_id) ?? previous.get(native.task_id);
+          const task: BackgroundTask = {
+            ...metadata,
+            taskId: native.task_id,
+            sessionKey: context.nativeTaskSessionKey,
+            provider: PROVIDER,
+            kind:
+              metadata?.kind ??
+              (native.task_type.startsWith("monitor")
+                ? "monitor"
+                : ["local_bash", "shell"].includes(native.task_type)
+                  ? "command"
+                  : "unknown"),
+            description: native.description,
+            canStop: context.query.stopTask !== undefined,
+          };
+          context.nativeBackgroundTasks.set(native.task_id, task);
+          yield* offerRuntimeEvent({
+            ...base,
+            ...(yield* makeEventStamp()),
+            type: "task.updated",
+            payload: {
+              taskId: RuntimeTaskId.make(native.task_id),
+              description: native.description,
+              taskType: native.task_type === "mcp_task" ? "shell" : native.task_type,
+              status: "running",
+            },
+          });
+        }
+        for (const [taskId] of previous) {
+          if (!context.nativeBackgroundTasks.has(taskId))
+            yield* offerRuntimeEvent({
+              ...base,
+              ...(yield* makeEventStamp()),
+              type: "task.completed",
+              payload: {
+                taskId: RuntimeTaskId.make(taskId),
+                status: "completed",
+                taskType: "shell",
+              },
+            });
+        }
+        return;
+      }
+      // CLI chrome and control-request heartbeats have no task surface.
       case "local_command_output":
       case "plugin_install":
       case "commands_changed":
       case "memory_recall":
       case "elicitation_complete":
-      case "background_tasks_changed":
       case "control_request_progress":
       case "worker_shutting_down":
         return;
@@ -5101,6 +5247,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       };
 
       const context: ClaudeSessionContext = {
+        nativeTaskSessionKey: yield* randomUUIDv4,
+        hasNativeBackgroundRoster: false,
+        nativeBackgroundTasks: new Map(),
+        nativeTaskMetadata: new Map(),
         session,
         startInput: input,
         turnStartMessageIds: resumeState?.turnStartMessageIds
@@ -5660,7 +5810,63 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     ),
   );
 
+  const currentBackgroundTask = Effect.fn("currentBackgroundTask")(function* (
+    input: import("@t3tools/contracts").BackgroundTaskInput,
+  ) {
+    const context = yield* requireSession(input.threadId);
+    if (context.nativeTaskSessionKey !== input.sessionKey)
+      return yield* new ProviderAdapterRequestError({
+        provider: PROVIDER,
+        method: "backgroundTasks",
+        detail: "The task belongs to an earlier provider session.",
+      });
+    return { context, task: context.nativeBackgroundTasks.get(input.taskId) };
+  });
+  const backgroundTasks: NonNullable<ClaudeAdapterShape["backgroundTasks"]> = {
+    list: (threadId) =>
+      requireSession(threadId).pipe(
+        Effect.map((context) =>
+          Array.from(
+            context.nativeBackgroundTasks.values(),
+            ({ outputFile: _path, ...task }) => task,
+          ),
+        ),
+      ),
+    stop: (input) =>
+      Effect.gen(function* () {
+        const { context, task } = yield* currentBackgroundTask(input);
+        if (!task) return;
+        if (!context.query.stopTask)
+          return yield* toRequestError(
+            input.threadId,
+            "stop_task",
+            new Error("This Claude runtime does not support stopping individual tasks."),
+          );
+        yield* Effect.tryPromise({
+          try: () => context.query.stopTask!(task.taskId),
+          catch: (cause) =>
+            new ProviderAdapterRequestError({
+              provider: PROVIDER,
+              method: "stop_task",
+              detail: toMessage(cause, "Could not stop this task."),
+              cause,
+            }),
+        });
+      }),
+    output: (input) =>
+      Effect.gen(function* () {
+        const { task } = yield* currentBackgroundTask(input);
+        if (!task?.outputFile) return { available: false, text: "", truncated: false };
+        return yield* readNativeOutputTail(fileSystem, task.outputFile).pipe(
+          Effect.mapError((cause) =>
+            toRequestError(input.threadId, "backgroundTasks.output", cause),
+          ),
+        );
+      }),
+  };
+
   return {
+    backgroundTasks,
     provider: PROVIDER,
     capabilities: {
       sessionModelSwitch: "in-session",

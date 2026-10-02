@@ -286,6 +286,14 @@ import {
 } from "./sourceControl.ts";
 import { VcsError } from "./vcs.ts";
 
+import {
+  BackgroundTasksInput,
+  BackgroundTaskInput,
+  BackgroundTasksSnapshot,
+  BackgroundTaskOutput,
+  BackgroundTaskError,
+} from "./backgroundTasks.ts";
+
 export const WS_METHODS = {
   // Project registry methods
   projectsList: "projects.list",
@@ -312,6 +320,9 @@ export const WS_METHODS = {
 
   // Provider methods
   providerUploadFeedback: "provider.uploadFeedback",
+  backgroundTasksSubscribe: "backgroundTasks.subscribe",
+  backgroundTasksStop: "backgroundTasks.stop",
+  backgroundTasksOutput: "backgroundTasks.output",
   providerAuthStart: "provider.auth.start",
   providerConsumeResetCredit: "provider.consumeResetCredit",
   providerAuthComplete: "provider.auth.complete",
@@ -1449,7 +1460,26 @@ const WsSubscribeResourceTelemetryRpc = Rpc.make(WS_METHODS.subscribeResourceTel
   stream: true,
 });
 
+const WsBackgroundTasksSubscribeRpc = Rpc.make(WS_METHODS.backgroundTasksSubscribe, {
+  payload: BackgroundTasksInput,
+  success: BackgroundTasksSnapshot,
+  error: Schema.Union([BackgroundTaskError, EnvironmentAuthorizationError]),
+  stream: true,
+});
+const WsBackgroundTasksStopRpc = Rpc.make(WS_METHODS.backgroundTasksStop, {
+  payload: BackgroundTaskInput,
+  error: Schema.Union([BackgroundTaskError, EnvironmentAuthorizationError]),
+});
+const WsBackgroundTasksOutputRpc = Rpc.make(WS_METHODS.backgroundTasksOutput, {
+  payload: BackgroundTaskInput,
+  success: BackgroundTaskOutput,
+  error: Schema.Union([BackgroundTaskError, EnvironmentAuthorizationError]),
+});
+
 export const WsRpcGroup = RpcGroup.make(
+  WsBackgroundTasksSubscribeRpc,
+  WsBackgroundTasksStopRpc,
+  WsBackgroundTasksOutputRpc,
   WsServerProbeRpc,
   WsServerGetConfigRpc,
   WsServerRefreshProvidersRpc,

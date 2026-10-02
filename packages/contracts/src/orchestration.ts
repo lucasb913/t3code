@@ -926,6 +926,9 @@ export const OrchestrationThreadShell = Schema.Struct({
    * live work. Optional so old servers/clients interop; absent = none.
    */
   backgroundLiveness: Schema.optional(Schema.NullOr(Schema.Literals(["working", "monitoring"]))),
+  backgroundTaskSummary: Schema.optional(
+    Schema.Struct({ count: NonNegativeInt, oldestStartedAt: Schema.NullOr(IsoDateTime) }),
+  ),
   /**
    * Current plan step while a turn runs, for the Working indicators
    * (sidebar row, in-chat working line). Cleared when the turn settles —

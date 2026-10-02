@@ -2694,6 +2694,11 @@ const makeWsRpcLayer = (
             }),
             { "rpc.aggregate": "server" },
           ),
+        [WS_METHODS.backgroundTasksSubscribe]: (input) =>
+          providerService.subscribeBackgroundTasks(input),
+        [WS_METHODS.backgroundTasksStop]: (input) => providerService.stopBackgroundTask(input),
+        [WS_METHODS.backgroundTasksOutput]: (input) =>
+          providerService.readBackgroundTaskOutput(input),
         [WS_METHODS.providerUploadFeedback]: (input) =>
           observeRpcEffect(
             WS_METHODS.providerUploadFeedback,

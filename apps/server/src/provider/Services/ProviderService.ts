@@ -12,6 +12,11 @@
  * @module ProviderService
  */
 import type {
+  BackgroundTasksInput,
+  BackgroundTaskInput,
+  BackgroundTasksSnapshot,
+  BackgroundTaskOutput,
+  BackgroundTaskError,
   ProviderInterruptTurnInput,
   ProviderInstanceId,
   ProviderRespondToRequestInput,
@@ -39,6 +44,19 @@ import type { ProviderInstanceRoutingInfo } from "./ProviderAdapterRegistry.ts";
  * ProviderServiceShape - Service API for provider session and turn orchestration.
  */
 export interface ProviderServiceShape {
+  readonly listBackgroundTasks: (
+    input: BackgroundTasksInput,
+  ) => Effect.Effect<BackgroundTasksSnapshot, BackgroundTaskError>;
+  readonly subscribeBackgroundTasks: (
+    input: BackgroundTasksInput,
+  ) => Stream.Stream<BackgroundTasksSnapshot, BackgroundTaskError>;
+  readonly stopBackgroundTask: (
+    input: BackgroundTaskInput,
+  ) => Effect.Effect<void, BackgroundTaskError>;
+  readonly readBackgroundTaskOutput: (
+    input: BackgroundTaskInput,
+  ) => Effect.Effect<BackgroundTaskOutput, BackgroundTaskError>;
+
   /**
    * Start a provider session.
    */

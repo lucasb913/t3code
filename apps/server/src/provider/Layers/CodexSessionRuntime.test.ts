@@ -18,6 +18,7 @@ import {
   buildTurnStartParams,
   describeMcpElicitation,
   hasConfiguredMcpServer,
+  listCodexBackgroundTerminals,
   isRecoverableThreadResumeError,
   makeMemoryConsolidationNotificationFilter,
   openCodexThread,
@@ -1066,6 +1067,53 @@ describe("openCodexThread", () => {
 
       NodeAssert.ok(isCodexAppServerRequestError(error));
       NodeAssert.equal(error.errorMessage, "timed out waiting for server");
+    }),
+  );
+});
+
+describe("Codex native background terminals", () => {
+  it.effect("lists every page with native handles and rejects cursor cycles", () =>
+    Effect.gen(function* () {
+      const requests: unknown[] = [];
+      const client: Parameters<typeof listCodexBackgroundTerminals>[0] = {
+        raw: {
+          request: (method, params) =>
+            Effect.sync(() => {
+              NodeAssert.equal(method, "thread/backgroundTerminals/list");
+              requests.push(params);
+              return requests.length === 1
+                ? {
+                    data: [{ processId: "opaque-a", itemId: "item-a", command: "dev" }],
+                    nextCursor: "next",
+                  }
+                : { data: [{ processId: "opaque-b" }], nextCursor: null };
+            }),
+        },
+      };
+      NodeAssert.deepEqual(yield* listCodexBackgroundTerminals(client, "native-thread"), [
+        { processId: "opaque-a", itemId: "item-a", command: "dev" },
+        { processId: "opaque-b" },
+      ]);
+      NodeAssert.deepEqual(requests, [
+        { threadId: "native-thread", cursor: null, limit: 100 },
+        { threadId: "native-thread", cursor: "next", limit: 100 },
+      ]);
+      const cyclic: Parameters<typeof listCodexBackgroundTerminals>[0] = {
+        raw: { request: () => Effect.succeed({ data: [], nextCursor: "loop" }) },
+      };
+      NodeAssert.ok(
+        isCodexAppServerRequestError(
+          yield* Effect.flip(listCodexBackgroundTerminals(cyclic, "native-thread")),
+        ),
+      );
+      const malformed: Parameters<typeof listCodexBackgroundTerminals>[0] = {
+        raw: { request: () => Effect.succeed({ data: [{ osPid: 123 }] }) },
+      };
+      NodeAssert.ok(
+        isCodexAppServerRequestError(
+          yield* Effect.flip(listCodexBackgroundTerminals(malformed, "native-thread")),
+        ),
+      );
     }),
   );
 });

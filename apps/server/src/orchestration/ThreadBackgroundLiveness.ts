@@ -25,6 +25,7 @@ export type ThreadBackgroundLiveness = "working" | "monitoring" | null;
 interface ThreadLivenessState {
   readonly agents: Set<string>;
   readonly monitors: Set<string>;
+  readonly monitorStartedAt: Map<string, string>;
 }
 
 // Classification sets are the shared contracts copies (MONITOR_TASK_TYPES:
@@ -59,6 +60,7 @@ export class ThreadBackgroundLivenessService extends Context.Service<
       readonly status: string | undefined;
       readonly kind: "started" | "progress" | "updated" | "completed";
       readonly agentId?: string | undefined;
+      readonly createdAt?: string | undefined;
     }) => void;
 
     /** Session death orphans all of a thread's background work. */
@@ -68,6 +70,10 @@ export class ThreadBackgroundLivenessService extends Context.Service<
      * Two-state vocabulary by design: any live agent work is "working";
      * "monitoring" only when watch loops are the ONLY live work.
      */
+    readonly getThreadBackgroundTaskSummary: (threadId: string) => {
+      count: number;
+      oldestStartedAt: string | null;
+    };
     readonly getThreadBackgroundLiveness: (threadId: string) => ThreadBackgroundLiveness;
   }
 >()("t3/orchestration/ThreadBackgroundLiveness/ThreadBackgroundLivenessService") {}
@@ -80,7 +86,11 @@ export function make(): ThreadBackgroundLivenessService["Service"] {
     if (existing) {
       return existing;
     }
-    const created: ThreadLivenessState = { agents: new Set(), monitors: new Set() };
+    const created: ThreadLivenessState = {
+      agents: new Set(),
+      monitors: new Set(),
+      monitorStartedAt: new Map(),
+    };
     stateByThreadId.set(threadId, created);
     return created;
   };
@@ -96,6 +106,7 @@ export function make(): ThreadBackgroundLivenessService["Service"] {
     }
     state.agents.delete(taskId);
     state.monitors.delete(taskId);
+    state.monitorStartedAt.delete(taskId);
     if (state.agents.size === 0 && state.monitors.size === 0) {
       stateByThreadId.delete(threadId);
     }
@@ -142,17 +153,28 @@ export function make(): ThreadBackgroundLivenessService["Service"] {
         }
       }
 
+      const startedAt =
+        stateByThreadId.get(input.threadId)?.monitorStartedAt.get(input.taskId) ?? input.createdAt;
       drop(input.threadId, input.taskId);
       const state = stateFor(input.threadId);
       const bucket =
         taskType !== undefined && MONITOR_TASK_TYPES.has(taskType) ? state.monitors : state.agents;
       bucket.add(input.taskId);
+      if (bucket === state.monitors && startedAt)
+        state.monitorStartedAt.set(input.taskId, startedAt);
     },
 
     clearThreadLiveness: (threadId) => {
       stateByThreadId.delete(threadId);
     },
 
+    getThreadBackgroundTaskSummary: (threadId) => {
+      const state = stateByThreadId.get(threadId);
+      return {
+        count: state?.monitors.size ?? 0,
+        oldestStartedAt: state ? ([...state.monitorStartedAt.values()].sort()[0] ?? null) : null,
+      };
+    },
     getThreadBackgroundLiveness: (threadId) => {
       const state = stateByThreadId.get(threadId);
       if (!state) {

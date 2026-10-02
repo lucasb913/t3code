@@ -56,6 +56,10 @@ const makeThread = (
 
 const makeProviderService = (liveThreadIds: ReadonlyArray<ThreadId> = []) =>
   ({
+    listBackgroundTasks: () => Effect.succeed({ supported: false, tasks: [] }),
+    subscribeBackgroundTasks: () => Stream.empty,
+    stopBackgroundTask: () => Effect.die("Background task stop not stubbed"),
+    readBackgroundTaskOutput: () => Effect.die("Background task output not stubbed"),
     startSession: () => Effect.die("unused"),
     sendTurn: () => Effect.die("unused"),
     compactThread: () => Effect.die("unused"),

@@ -84,6 +84,22 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
       }),
   );
 
+  public terminalRoster: Array<{ processId: string; itemId?: string; command?: string }> = [];
+  public readonly stopTerminalCalls: string[] = [];
+  public keepTerminalAfterStop = false;
+  public readonly backgroundTerminals = {
+    list: Effect.sync(() => this.terminalRoster),
+    stop: (processId: string) =>
+      Effect.sync(() => {
+        this.stopTerminalCalls.push(processId);
+        if (!this.keepTerminalAfterStop)
+          this.terminalRoster = this.terminalRoster.filter(
+            (terminal) => terminal.processId !== processId,
+          );
+        return true;
+      }),
+  };
+
   public readonly compactThread = Effect.void;
 
   public readonly interruptTurnImpl = vi.fn((_turnId?: TurnId): Promise<void> =>
@@ -1337,6 +1353,57 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         },
       });
     }),
+  );
+
+  it.effect(
+    "stops only the selected native terminal, confirms removal, and rejects stale sessions",
+    () =>
+      Effect.gen(function* () {
+        const { adapter, runtime } = yield* startLifecycleRuntime();
+        NodeAssert.ok(adapter.backgroundTasks);
+        const threadId = runtime.options.threadId;
+        runtime.terminalRoster = [
+          { processId: "opaque-a", command: "dev server" },
+          { processId: "opaque-b", command: "watch build" },
+        ];
+        const [a, b] = yield* adapter.backgroundTasks.list(threadId);
+        NodeAssert.ok(a && b);
+        const input = { threadId, taskId: a.taskId, sessionKey: a.sessionKey };
+        const stopped = yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.type === "task.completed"),
+          Stream.runHead,
+          Effect.forkChild,
+        );
+        yield* adapter.backgroundTasks.stop(input);
+        yield* Fiber.join(stopped);
+        NodeAssert.deepEqual(runtime.stopTerminalCalls, ["opaque-a"]);
+        NodeAssert.deepEqual(
+          (yield* adapter.backgroundTasks.list(threadId)).map((task) => task.taskId),
+          ["opaque-b"],
+        );
+        yield* adapter.backgroundTasks.stop(input);
+        NodeAssert.deepEqual(runtime.stopTerminalCalls, ["opaque-a"]);
+        NodeAssert.equal(
+          (yield* adapter.backgroundTasks.output({
+            threadId,
+            taskId: b.taskId,
+            sessionKey: b.sessionKey,
+          })).available,
+          false,
+        );
+        const stale = yield* Effect.flip(
+          adapter.backgroundTasks.stop({ ...input, sessionKey: "earlier-session" }),
+        );
+        NodeAssert.match(stale.message, /earlier provider session/);
+        runtime.keepTerminalAfterStop = true;
+        const failure = yield* Effect.flip(
+          adapter.backgroundTasks.stop({ threadId, taskId: b.taskId, sessionKey: b.sessionKey }),
+        );
+        NodeAssert.match(failure.message, /still reports this terminal/);
+        NodeAssert.equal((yield* adapter.backgroundTasks.list(threadId)).length, 1);
+        yield* adapter.stopSession(threadId);
+        NodeAssert.equal(runtime.closeImpl.mock.calls.length, 1);
+      }),
   );
 
   it.effect("presents browser and computer-use calls with Codex-style titles and sources", () =>

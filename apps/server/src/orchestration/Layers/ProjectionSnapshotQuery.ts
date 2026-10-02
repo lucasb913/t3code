@@ -2809,6 +2809,8 @@ pending_approval_requests AS (
                         backgroundLiveness: threadBackgroundLiveness.getThreadBackgroundLiveness(
                           row.threadId,
                         ),
+                        backgroundTaskSummary:
+                          threadBackgroundLiveness.getThreadBackgroundTaskSummary(row.threadId),
                         planProgress: threadPlanProgress.getThreadPlanProgress(row.threadId),
                       } satisfies OrchestrationThreadShell)
                     : Result.failVoid,
@@ -2993,6 +2995,9 @@ pending_approval_requests AS (
                   hasPendingUserInput: row.pendingUserInputCount > 0,
                   hasActionableProposedPlan: row.hasActionableProposedPlan > 0,
                   backgroundLiveness: threadBackgroundLiveness.getThreadBackgroundLiveness(
+                    row.threadId,
+                  ),
+                  backgroundTaskSummary: threadBackgroundLiveness.getThreadBackgroundTaskSummary(
                     row.threadId,
                   ),
                   planProgress: threadPlanProgress.getThreadPlanProgress(row.threadId),
@@ -3342,6 +3347,9 @@ pending_approval_requests AS (
         hasPendingUserInput: threadRow.value.pendingUserInputCount > 0,
         hasActionableProposedPlan: threadRow.value.hasActionableProposedPlan > 0,
         backgroundLiveness: threadBackgroundLiveness.getThreadBackgroundLiveness(
+          threadRow.value.threadId,
+        ),
+        backgroundTaskSummary: threadBackgroundLiveness.getThreadBackgroundTaskSummary(
           threadRow.value.threadId,
         ),
         planProgress: threadPlanProgress.getThreadPlanProgress(threadRow.value.threadId),

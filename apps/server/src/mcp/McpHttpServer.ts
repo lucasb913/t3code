@@ -1,3 +1,7 @@
+import {
+  BackgroundTasksToolkit,
+  BackgroundTasksToolkitHandlersLive,
+} from "./toolkits/backgroundTasks.ts";
 import * as NodeCrypto from "node:crypto";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
@@ -668,6 +672,8 @@ const McpTransportLive = McpServer.layerHttp({
 }).pipe(Layer.provide(McpAuthMiddlewareLive));
 
 export const layer = Layer.mergeAll(
+  McpServer.toolkit(BackgroundTasksToolkit).pipe(Layer.provide(BackgroundTasksToolkitHandlersLive)),
+
   PreviewToolkitRegistrationLive,
   PullRequestsToolkitRegistrationLive,
   DeviceToolkitRegistrationLive,

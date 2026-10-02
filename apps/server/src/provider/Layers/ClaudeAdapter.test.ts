@@ -71,6 +71,12 @@ class FakeClaudeQuery implements AsyncIterable<SDKMessage> {
   public readonly setModelCalls: Array<string | undefined> = [];
   public readonly setPermissionModeCalls: Array<string> = [];
   public readonly setMaxThinkingTokensCalls: Array<number | null> = [];
+  public readonly stopTaskCalls: string[] = [];
+  public stopTaskError: Error | undefined;
+  readonly stopTask = async (taskId: string) => {
+    this.stopTaskCalls.push(taskId);
+    if (this.stopTaskError) throw this.stopTaskError;
+  };
   public closeCalls = 0;
   public closeError: unknown | undefined;
   /** Set by tests that exercise Claude's graceful interrupt. */
@@ -8443,4 +8449,117 @@ describe("ClaudeAdapterLive", () => {
       Effect.provide(harness.layer),
     );
   });
+});
+
+describe("native background tasks", () => {
+  it.effect(
+    "reconciles the roster, preserves other tasks on Stop and rejects stale session controls",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "full-access" });
+        const controls = adapter.backgroundTasks!;
+        const receipt = yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.type === "task.updated"),
+          Stream.take(2),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        const a = {
+          task_id: "command-a",
+          task_type: "local_bash",
+          description: "Development server",
+        };
+        const b = { task_id: "monitor-b", task_type: "monitor", description: "Watch pull request" };
+        harness.query.emit({
+          type: "system",
+          subtype: "background_tasks_changed",
+          tasks: [
+            a,
+            b,
+            { task_id: "agent-c", task_type: "local_agent", description: "Review code" },
+            { task_id: "agent-d", task_type: "remote_agent", description: "Remote review" },
+          ],
+          uuid: "00000000-0000-0000-0000-000000000001",
+          session_id: "sdk-session",
+        });
+        const events = yield* Fiber.join(receipt);
+        assert.notEqual(events[0]?.eventId, events[1]?.eventId);
+        const tasks = yield* controls.list(THREAD_ID);
+        assert.deepEqual(
+          tasks.map((task) => [task.taskId, task.kind]),
+          [
+            ["command-a", "command"],
+            ["monitor-b", "monitor"],
+          ],
+        );
+        const input = {
+          threadId: THREAD_ID,
+          taskId: "command-a",
+          sessionKey: tasks[0]!.sessionKey,
+        };
+        yield* controls.stop(input);
+        assert.deepEqual(harness.query.stopTaskCalls, ["command-a"]);
+        assert.equal(
+          (yield* controls.list(THREAD_ID)).length,
+          2,
+          "Stop acknowledgement is not completion",
+        );
+        const removed = yield* adapter.streamEvents.pipe(
+          Stream.filter(
+            (event) => event.type === "task.completed" && event.payload.taskId === "command-a",
+          ),
+          Stream.take(1),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        harness.query.emit({
+          type: "system",
+          subtype: "background_tasks_changed",
+          tasks: [b],
+          uuid: "00000000-0000-0000-0000-000000000002",
+          session_id: "sdk-session",
+        });
+        yield* Fiber.join(removed);
+        assert.deepEqual(
+          (yield* controls.list(THREAD_ID)).map((task) => task.taskId),
+          ["monitor-b"],
+        );
+        const lateStart = yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.type === "task.started"),
+          Stream.take(1),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        harness.query.emit({
+          type: "system",
+          subtype: "task_started",
+          task_id: "command-a",
+          task_type: "local_bash",
+          description: "Development server",
+          is_backgrounded: true,
+          uuid: "00000000-0000-0000-0000-000000000003",
+          session_id: "sdk-session",
+        });
+        yield* Fiber.join(lateStart);
+        assert.deepEqual(
+          (yield* controls.list(THREAD_ID)).map((task) => task.taskId),
+          ["monitor-b"],
+          "Late bookends cannot override the authoritative roster",
+        );
+        const stale = yield* Effect.flip(
+          controls.stop({ ...input, taskId: "monitor-b", sessionKey: "old-session" }),
+        );
+        assert.include(stale.message, "earlier provider session");
+        harness.query.stopTaskError = new Error("native request failed");
+        const failed = yield* Effect.flip(controls.stop({ ...input, taskId: "monitor-b" }));
+        assert.include(failed.message, "native request failed");
+        assert.equal((yield* controls.list(THREAD_ID)).length, 1);
+        yield* adapter.stopSession(THREAD_ID);
+        assert.equal(harness.query.closeCalls, 1);
+        assert.equal((yield* adapter.listSessions()).length, 0);
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
 });

@@ -10,6 +10,7 @@
  * @module ProviderServiceLive
  */
 import {
+  BackgroundTaskError,
   EventId,
   MessageId,
   ModelSelection,
@@ -2449,7 +2450,76 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     ),
   );
 
+  const backgroundTaskError = (cause: { readonly message: string }) =>
+    new BackgroundTaskError({ detail: cause.message });
+  const listBackgroundTasks: ProviderServiceMethod<"listBackgroundTasks"> = (input) =>
+    Effect.gen(function* () {
+      const binding = yield* directory.getBinding(input.threadId);
+      if (Option.isNone(binding)) return { supported: false, tasks: [] };
+      const routed = yield* resolveRoutableSession({
+        threadId: input.threadId,
+        operation: "backgroundTasks.list",
+        allowRecovery: false,
+      });
+      return {
+        supported: routed.adapter.backgroundTasks !== undefined,
+        tasks:
+          routed.isActive && routed.adapter.backgroundTasks
+            ? yield* routed.adapter.backgroundTasks.list(routed.threadId)
+            : [],
+      };
+    }).pipe(Effect.mapError(backgroundTaskError));
+  const backgroundTasks = {
+    subscribe: (input: import("@t3tools/contracts").BackgroundTasksInput) =>
+      Stream.merge(
+        Stream.fromEffect(listBackgroundTasks(input)),
+        Stream.fromPubSub(runtimeEventPubSub).pipe(
+          Stream.filter(
+            (event) =>
+              event.threadId === input.threadId &&
+              (event.type.startsWith("task.") ||
+                event.type === "item.started" ||
+                event.type === "item.completed" ||
+                event.type === "item.updated" ||
+                event.type.startsWith("turn.") ||
+                event.type.startsWith("session.")),
+          ),
+          Stream.mapEffect(() => listBackgroundTasks(input)),
+        ),
+      ).pipe(Stream.changesWith((left, right) => JSON.stringify(left) === JSON.stringify(right))),
+    stop: (input: import("@t3tools/contracts").BackgroundTaskInput) =>
+      Effect.gen(function* () {
+        const routed = yield* resolveRoutableSession({
+          threadId: input.threadId,
+          operation: "backgroundTasks.stop",
+          allowRecovery: false,
+        });
+        if (!routed.isActive || !routed.adapter.backgroundTasks)
+          return yield* new BackgroundTaskError({
+            detail: "This provider session is no longer active or does not support task controls.",
+          });
+        yield* routed.adapter.backgroundTasks.stop(input);
+      }).pipe(Effect.mapError(backgroundTaskError)),
+    output: (input: import("@t3tools/contracts").BackgroundTaskInput) =>
+      Effect.gen(function* () {
+        const routed = yield* resolveRoutableSession({
+          threadId: input.threadId,
+          operation: "backgroundTasks.output",
+          allowRecovery: false,
+        });
+        if (!routed.isActive || !routed.adapter.backgroundTasks)
+          return yield* new BackgroundTaskError({
+            detail: "This provider session is no longer active.",
+          });
+        return yield* routed.adapter.backgroundTasks.output(input);
+      }).pipe(Effect.mapError(backgroundTaskError)),
+  };
+
   return {
+    listBackgroundTasks,
+    subscribeBackgroundTasks: backgroundTasks.subscribe,
+    stopBackgroundTask: backgroundTasks.stop,
+    readBackgroundTaskOutput: backgroundTasks.output,
     startSession,
     sendTurn,
     compactThread,

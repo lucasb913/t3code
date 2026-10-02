@@ -190,6 +190,10 @@ describe("ProviderSessionReaper", () => {
     );
 
     const providerService: ProviderServiceShape = {
+      listBackgroundTasks: () => Effect.succeed({ supported: false, tasks: [] }),
+      subscribeBackgroundTasks: () => Stream.empty,
+      stopBackgroundTask: () => Effect.die("Background task stop not stubbed"),
+      readBackgroundTaskOutput: () => Effect.die("Background task output not stubbed"),
       startSession: () => unsupported(),
       sendTurn: () => unsupported(),
       compactThread: () => unsupported(),

@@ -8,6 +8,9 @@
  * @module ProviderAdapter
  */
 import type {
+  BackgroundTask,
+  BackgroundTaskInput,
+  BackgroundTaskOutput,
   ApprovalRequestId,
   ProviderApprovalDecision,
   ProviderDriverKind,
@@ -87,6 +90,13 @@ export interface ProviderAdapterShape<TError> {
 
   /** Omitted when this adapter does not support manual context compaction. */
   readonly compaction?: ProviderCompaction<TError>;
+
+  /** Native tasks only; never discovers or signals arbitrary host processes. */
+  readonly backgroundTasks?: {
+    readonly list: (threadId: ThreadId) => Effect.Effect<ReadonlyArray<BackgroundTask>, TError>;
+    readonly stop: (input: BackgroundTaskInput) => Effect.Effect<void, TError>;
+    readonly output: (input: BackgroundTaskInput) => Effect.Effect<BackgroundTaskOutput, TError>;
+  };
 
   /**
    * Interrupt an active turn.
