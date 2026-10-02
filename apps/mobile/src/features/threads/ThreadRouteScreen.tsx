@@ -1,3 +1,4 @@
+import { BackgroundTasksButton } from "./BackgroundTasksButton";
 import { makeTurnCommandMetadata } from "../../lib/commandMetadata";
 import { enqueueThreadOutboxMessage } from "../../state/thread-outbox";
 import {
@@ -955,6 +956,11 @@ function ThreadRouteContent(
   const renderThreadRouteBody = () => (
     <>
       <GitActionProgressOverlay progress={gitActionProgress} onDismiss={dismissGitActionResult} />
+      <BackgroundTasksButton
+        key={`${selectedThread.environmentId}:${selectedThread.id}`}
+        environmentId={selectedThread.environmentId}
+        threadId={selectedThread.id}
+      />
 
       <View className="flex-1 bg-screen android:overflow-hidden android:rounded-t-[28px] android:bg-thread-canvas">
         <ThreadDetailScreen
